@@ -1,5 +1,6 @@
 package the.swarm;
 
+import java.awt.Canvas;
 import java.awt.Component;
 import java.awt.Font;
 import java.awt.Frame;
@@ -24,13 +25,14 @@ import javax.media.opengl.fixedfunc.GLMatrixFunc;
 import javax.media.opengl.glu.GLU;
 
 import the.swarm.gfx.StaticPoint;
+import the.swarm.util.SwarmTimer;
 
 import com.jogamp.newt.event.InputEvent;
 import com.jogamp.newt.event.KeyAdapter;
 import com.jogamp.opengl.util.Animator;
 import com.jogamp.opengl.util.awt.TextRenderer;
 
-public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
+public class TheSwarm implements GLEventListener, KeyListener {
 	float rotateT = 0.0f;
 	static GLU glu = new GLU();
 	static GLCanvas canvas = new GLCanvas();
@@ -38,13 +40,15 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 	TextRenderer renderer;
 
 	// config properties
-	static int FOLLOWERS = 200;
+	static int FOLLOWERS = 6000;
 
 	// FIXME: just slapping these guys here?
 	private Swarmer leader;
 	private Swarmer leaderTarget;
+
 	private Swarmer modifiedTarget;
 	private Swarmer[] followers;
+	private float[] superVectors;
 
 	private StaticPoint[] leaderTrace = new StaticPoint[1000];
 	private int leaderTraceIndex = 0;
@@ -52,8 +56,21 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 	private int followersTraceIndex = 0;
 
 	private boolean tracing = false; // FIXME: move this state somewhere else
+	private boolean zoomOut;
+	private boolean zoomIn;
+	
+
+	float cameraZoom = -10.0f;
 
 	private int frameCounter = 0;
+	
+	// Stuff for calculating framerate
+	private long[] frameTimes = new long[30];
+	private boolean frameTimesFilled = false;
+	private int frameTimeCounter = 0;
+	private long totalFrameTime = 0l;
+	private float frameRate;
+	private long lastFrameTime;
 
 	static Animator animator = new Animator(canvas);
 	
@@ -61,22 +78,21 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 	FloatBuffer projection = FloatBuffer.allocate(16);
 	FloatBuffer modelview = FloatBuffer.allocate(16);
 	IntBuffer viewport = IntBuffer.allocate(16);
-	Point mouseClick;
+	
+	
+	
+	private boolean printedDebugTiming;
+	
 
-	// Input settings
-	private int forward = KeyEvent.VK_W;
-	private int backward = KeyEvent.VK_S;
-	private int strafel = KeyEvent.VK_A;
-	private int strafer = KeyEvent.VK_D;
-	private int shoot = InputEvent.BUTTON1_MASK;
-	private int use = InputEvent.BUTTON3_MASK;
 
 	public void display(GLAutoDrawable gLDrawable) {
+		SwarmTimer.start("display-translate");
+		
 		final GL2 gl = gLDrawable.getGL().getGL2();
 		gl.glClear(GL.GL_COLOR_BUFFER_BIT);
 		gl.glClear(GL.GL_DEPTH_BUFFER_BIT);
 		gl.glLoadIdentity();
-		gl.glTranslatef(0.0f, 0.0f, -10.0f); // move camera back by 5
+		gl.glTranslatef(0.0f, 0.0f, cameraZoom); // move camera back by 5
 		gl.glGetFloatv(GLMatrixFunc.GL_MODELVIEW_MATRIX, modelview); // save off a copy of the modelview matrix
 		
 		// rotate on the three axis
@@ -84,6 +100,10 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 		// gl.glRotatef(rotateT, 0.0f, 1.0f, 0.0f);
 		// gl.glRotatef(rotateT, 0.0f, 0.0f, 1.0f);
 
+		SwarmTimer.end("display-translate");
+		
+		SwarmTimer.start("display-points");
+		
 		// DRAW
 		gl.glBegin(GL2.GL_POINTS);
 		gl.glColor3f(1.0f, 0.6f, 0.6f); // set leader color to red
@@ -94,10 +114,19 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 			}
 		}
 		gl.glColor3f(0.6f, 0.6f, 1.0f); // color = blue
+		
 		if (followers != null) {
-			for (Swarmer s : followers) {
-				s.draw(gl);
+			for(int i = 0; i < followers.length; i++) {
+				this.superVectors[i*3] = followers[i].pos.x;
+				this.superVectors[i*3+1] = followers[i].pos.y;
+				this.superVectors[i*3+2] = followers[i].pos.z;
 			}
+			gl.glVertex3fv(this.superVectors, 0);
+//			gl.glVertex3fv(FloatBuffer.wrap(this.superVectors));
+//			for (Swarmer s : followers) {
+//				s.draw(gl);
+//				
+//			}
 		}
 		if (this.tracing) {
 			for (int i = 0; i < followersTraceIndex; i++) {
@@ -110,9 +139,14 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 		modifiedTarget.draw(gl);
 		gl.glEnd();
 
+		SwarmTimer.end("display-points");
+		
+		
 		// increasing rotation for the next iteration
 		// rotateT += 0.2f;
 
+		
+		SwarmTimer.start("display-recalculate-positions");
 		// RECALC POSITIONS
 		// Check if leader is near target, within some threshold of distance
 		float targetThreshold = 0.1f;
@@ -129,13 +163,11 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 		// System.out.println("accelDelta: " + accelDelta);
 		leader.vec = leader.vec.add(accelDelta);
 		leader.pos = leader.pos.add(leader.vec);
-		if (tracing && frameCounter % 10 == 0) {
-			if (leaderTraceIndex < leaderTrace.length) {
-				leaderTrace[leaderTraceIndex] = leader.pos.toStaticPoint();
-				leaderTraceIndex++;
-			}
-		}
 
+		SwarmTimer.end("display-recalculate-positions");
+		
+
+		SwarmTimer.start("display-recalculate-positions-swarm");
 		// Accelerate the followers towards the leader
 		if (followers != null) {
 			for (Swarmer s : followers) {
@@ -151,19 +183,55 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 				}
 			}
 		}
-		
-	   
-	    
+
+		SwarmTimer.end("display-recalculate-positions-swarm");
+
+		// Make changes based on Input
+		if (tracing && frameCounter % 10 == 0) {
+			if (leaderTraceIndex < leaderTrace.length) {
+				leaderTrace[leaderTraceIndex] = leader.pos.toStaticPoint();
+				leaderTraceIndex++;
+			}
+		}
+		if (zoomIn && cameraZoom < 0f) {
+			cameraZoom = cameraZoom * 0.99f;
+		} else if (zoomOut) {
+			cameraZoom = cameraZoom * 1.01f;
+
+		}
+
+
+		SwarmTimer.start("display-hud");
+	    // HUD Drawing
 		renderer.beginRendering(gLDrawable.getWidth(), gLDrawable.getHeight());
 		// optionally set the color
 		renderer.setColor(1.0f, 0.2f, 0.2f, 0.8f);
-		if (mouseClick != null) {
-			renderer.draw("Mouse Click: " + mouseClick.x + ", " + mouseClick.y, 5, 5);	
+		if (MouseHandler.getHandler() != null) {
+			renderer.draw("Target: " + leaderTarget.pos, 5, 35);	
 		}
+		if (MouseHandler.getHandler() != null) {
+			renderer.draw("Camera Zoom: " + cameraZoom, 5, 20);	
+		}
+		if (MouseHandler.getHandler() != null) {
+			renderer.draw("Framerate: " + frameRate, 5, 5);	
+		}
+		
+		SwarmTimer.end("display-hud");
+		
 		// ... more draw commands, color changes, etc.
 		renderer.endRendering();
 
 		frameCounter++;
+		
+		// Calculate Framerate
+		totalFrameTime -= frameTimes[frameTimeCounter];
+		long currentFrameTime = System.nanoTime();
+		frameTimes[frameTimeCounter] = currentFrameTime - lastFrameTime;
+		totalFrameTime += frameTimes[frameTimeCounter];
+		lastFrameTime = currentFrameTime;
+		frameTimeCounter++;
+		frameTimeCounter = (frameTimeCounter >= frameTimes.length) ? 0 : frameTimeCounter;
+		frameRate = totalFrameTime == 0 ? 0 : 1000000000 / (totalFrameTime / frameTimes.length);
 	}
 
 	public void displayChanged(GLAutoDrawable gLDrawable, boolean modeChanged,
@@ -179,24 +247,28 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 		gl.glDepthFunc(GL.GL_LEQUAL);
 		gl.glHint(GL2ES1.GL_PERSPECTIVE_CORRECTION_HINT, GL.GL_NICEST);
 		((Component) gLDrawable).addKeyListener(this);
-		((Component) gLDrawable).addMouseListener(this);
+		MouseHandler.init(this);
+		((Component) gLDrawable).addMouseListener(MouseHandler.getHandler());
 
 		// Create initial vectors and stuff
 		this.leader = new Swarmer(Vector3f.random(), 0.00001f);
 		this.leaderTarget = new Swarmer(Vector3f.random(), 0.0f);
 		this.modifiedTarget = new Swarmer(leaderTarget.pos.multiply(1), 0.0f);
 		this.followers = new Swarmer[FOLLOWERS];
+		this.superVectors = new float[FOLLOWERS*3];
 		for (int i = 0; i < FOLLOWERS; i++) {
 			this.followers[i] = new Swarmer(Vector3f.random(), 0.000008f);
 		}
 		
 		// Set up TextRenderer
-		renderer = new TextRenderer(new Font("SansSerif", Font.BOLD, 36));
+		renderer = new TextRenderer(new Font("SansSerif", Font.BOLD, 16));
 
 	}
 
 	public void reshape(GLAutoDrawable gLDrawable, int x, int y, int width,
 			int height) {
+		SwarmTimer.start("reshape");
+		
 		GL2 gl = gLDrawable.getGL().getGL2();
 		if (height <= 0) {
 			height = 1;
@@ -214,6 +286,7 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 		gl.glMatrixMode(GLMatrixFunc.GL_MODELVIEW);
 		gl.glLoadIdentity();
 		
+		SwarmTimer.end("reshape");
 	}
 
 	public void keyPressed(KeyEvent e) {
@@ -228,6 +301,25 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 			this.tracing = true;
 		}
 
+		if (e.getKeyCode() == KeyEvent.VK_X) {
+			this.zoomIn = true;
+		}
+		if (e.getKeyCode() == KeyEvent.VK_Z) {
+			this.zoomOut = true;
+		}
+		
+
+		if (e.getKeyCode() == KeyEvent.VK_0) {
+			cameraZoom = -10.0f;
+		}
+		
+		if (e.getKeyCode() == KeyEvent.VK_T) {
+			if(!printedDebugTiming) {
+				System.out.println(SwarmTimer.getResults());
+				printedDebugTiming = true;
+			}
+			
+		}
 	}
 
 	public void keyReleased(KeyEvent e) {
@@ -236,12 +328,25 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 			this.leaderTraceIndex = 0;
 			this.followersTraceIndex = 0;
 		}
+		if (e.getKeyCode() == KeyEvent.VK_X) {
+			this.zoomIn = false;
+		}
+		if (e.getKeyCode() == KeyEvent.VK_Z) {
+			this.zoomOut = false;
+		}
+
+		if (e.getKeyCode() == KeyEvent.VK_T) {
+			printedDebugTiming = false;
+		}
 	}
 
 	public void keyTyped(KeyEvent e) {
 	}
 
 	public static void exit() {
+
+
+		
 		animator.stop();
 		frame.dispose();
 		System.exit(0);
@@ -255,6 +360,7 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 		frame.setExtendedState(Frame.NORMAL);
 		frame.addWindowListener(new WindowAdapter() {
 			public void windowClosing(WindowEvent e) {
+				
 				exit();
 			}
 		});
@@ -264,75 +370,40 @@ public class TheSwarm implements GLEventListener, KeyListener, MouseListener {
 	}
 
 	public void dispose(GLAutoDrawable gLDrawable) {
-		// do nothing
+		// Spit out timings
 	}
 
-	@Override
-	public void mouseClicked(MouseEvent e) {
-		Point p = e.getPoint();
-		mouseClick = p;
-
-		// All following code is to unproject the mouse click coordinates back into the 3d coordinates
-		// position_near is a point at z = 0
-		// position_far is a point at z = 1
-		// Together they can be used as a vector representing the ray traced by the mouse click, if needed.
-		float win_x = p.x;
-		float win_y = p.y;
-
-		FloatBuffer position_near = FloatBuffer.allocate(3);
-		FloatBuffer position_far = FloatBuffer.allocate(3);
-		
-
-		GL2 gl = canvas.getGL().getGL2();
-//		gl.glMatrixMode(GLMatrixFunc.GL_MODELVIEW);
-//		gl.glLoadIdentity();
-//
-//		gl.glTranslatef(0.0f, 0.0f, -10.0f); // move camera back by 5
-//		gl.glGetFloatv(GLMatrixFunc.GL_MODELVIEW_MATRIX, modelview); // save off a copy of the modelview matrix
-//		modelview = FloatBuffer.wrap(new float[]{1, 0, 0, 0,
-//									  			 0, 1, 0, 0,
-//								  			 	 0, 0, 1, 0,
-//								  			 	 0, 0, 0, 1});
-
-		boolean result1 = glu.gluUnProject(win_x, canvas.getHeight()-win_y, 0f, modelview, projection, viewport, position_near);
-		boolean result2 = glu.gluUnProject(win_x, canvas.getHeight()-win_y, 1f, modelview, projection, viewport, position_far);
-
-		// Reset the leader target to the place the mouse was clicked, assuming z = 0
-		this.leaderTarget = new Swarmer(new Vector3f(position_near.get(0), position_near.get(1), position_near.get(2)), 0);
-		
-		
-		// This is just junk leftover below here
-		
-		if ((e.getModifiers() & shoot) != 0)
-
-			;// game.setShoot();
-
-		if ((e.getModifiers() & use) != 0)
-
-			;// game.setUse();
+	public GL2 getGL2() {
+		return canvas.getGL().getGL2();
 	}
 
-	@Override
-	public void mouseEntered(MouseEvent e) {
-		// TODO Auto-generated method stub
-
+	public GLU getGLU() {
+		return glu;
 	}
 
-	@Override
-	public void mouseExited(MouseEvent e) {
-		// TODO Auto-generated method stub
-
+	public Canvas getCanvas() {
+		return this.canvas;
 	}
 
-	@Override
-	public void mousePressed(MouseEvent e) {
-		// TODO Auto-generated method stub
 
+	public Swarmer getLeaderTarget() {
+		return leaderTarget;
+	}
+	
+	public void setLeaderTarget(Swarmer lt) {
+		this.leaderTarget = lt;
 	}
 
-	@Override
-	public void mouseReleased(MouseEvent e) {
-		// TODO Auto-generated method stub
-
+	public FloatBuffer getProjection() {
+		return projection;
 	}
+
+	public FloatBuffer getModelview() {
+		return modelview;
+	}
+
+	public IntBuffer getViewport() {
+		return viewport;
+	}
+
 }
